@@ -1,22 +1,25 @@
 """
-Synthetic data generation for teaching nanochat about its identity and capabilities.
+合成数据生成 — 使用 OpenRouter API 生成用于教 nanochat 了解自身身份和能力的数据。
 
-This script uses the OpenRouter API to generate diverse multi-turn conversations
-between a user and nanochat. The conversations are saved to a .jsonl file for use
-in supervised finetuning (SFT) via the CustomJSON task.
+核心思路：通过 LLM 生成多样化的多轮对话，覆盖用户可能询问 nanochat 的各种问题
+（身份、架构、训练、能力、局限、对比等），将这些对话保存为 .jsonl 文件，
+供 SFT 训练使用（通过 CustomJSON 任务加载）。
 
-Key design principles for high-quality synthetic data:
-1. DIVERSITY CONTROL is critical - we inject entropy at multiple levels:
-   - Topic/question categories (what the conversation is about)
-   - User personas (who is asking)
-   - Conversation dynamics (shape and flow)
-   - First message style (greeting variation)
-2. Comprehensive knowledge base - we provide detailed facts so the LLM
-   generating conversations has accurate information to draw from.
-3. Structured outputs - we use JSON schema to guarantee valid format.
+高质量合成数据的关键设计原则：
 
-NOTE: You need OPENROUTER_API_KEY set in .env or as an environment variable.
-NOTE: For more details see: https://github.com/karpathy/nanochat/discussions/139
+1. 多样性控制 — 在四个维度注入熵：
+   - 话题/问题类别（identity/architecture/training/capabilities/limitations/comparisons/history/tech/philosophical）
+   - 用户人设（curious beginner / ML engineer / student / skeptic / journalist 等 12 种）
+   - 对话动态（short Q&A / deep discussion / skeptical arc / learning journey 等 10 种）
+   - 首条消息风格（simple greetings / caps_enthusiastic / typos_casual / multilingual 等 8 类）
+
+2. 全面知识库 — 从 self_knowledge.md 加载详细的 nanochat 事实信息，
+   确保生成对话的准确性。
+
+3. 结构化输出 — 使用 JSON Schema 约束 LLM 输出，保证格式有效。
+
+需要 OPENROUTER_API_KEY 环境变量（在 .env 中配置）。
+详见：https://github.com/karpathy/nanochat/discussions/139
 """
 import requests
 import json
@@ -46,11 +49,10 @@ assert os.path.exists(knowledge_path), f"Knowledge base file not found: {knowled
 # This whole file is just a helpful demonstration of the kind of thing you'd run.
 
 # =============================================================================
-# DIVERSITY DIMENSIONS
+# 多样性维度定义
 # =============================================================================
 
-# Topics/questions the conversation should explore
-# Group by category for balanced sampling
+# 话题/问题 — 按类别分组以便均衡采样
 topics = {
     "identity": [
         "who/what is nanochat",
@@ -130,7 +132,7 @@ topics = {
     ],
 }
 
-# User personas - different people ask questions differently
+# 用户人设 — 不同人以不同方式提问
 personas = [
     "curious beginner who knows nothing about AI or machine learning",
     "ML researcher or engineer who wants technical depth and specifics",
@@ -146,7 +148,7 @@ personas = [
     "someone who just discovered the project and wants the basics",
 ]
 
-# Conversation dynamics - shape and flow
+# 对话动态 — 对话的形状和流程
 dynamics = [
     "short 2-turn Q&A: user asks one question, gets a complete answer",
     "medium 4-turn: user asks, gets answer, asks followup for clarification",
@@ -160,7 +162,7 @@ dynamics = [
     "enthusiastic: user is excited about the project, assistant shares that energy appropriately",
 ]
 
-# First messages - greetings and openers
+# 首条消息 — 按类别分组，不同类型的开场白
 # Categorized for balanced sampling
 first_messages = {
     "simple_greetings": [
@@ -261,7 +263,7 @@ Generate the conversation as a JSON object with a "messages" array. Each message
 """.strip()
 
 # =============================================================================
-# API CONFIGURATION
+# API 配置
 # =============================================================================
 
 response_format = {
@@ -306,11 +308,11 @@ base_payload = {
 }
 
 # =============================================================================
-# GENERATION LOGIC
+# 生成逻辑
 # =============================================================================
 
 def sample_diversity_elements(rng):
-    """Sample one element from each diversity dimension."""
+    """从每个多样性维度随机采样一个元素。"""
     # Sample topic: first pick a category, then a topic within it
     category = rng.choice(list(topics.keys()))
     topic = rng.choice(topics[category])
@@ -337,8 +339,10 @@ def sample_diversity_elements(rng):
 
 def generate_conversation(idx: int):
     """
-    Generate a single conversation using the OpenRouter API.
-    Returns a list of message dicts with 'role' and 'content' keys.
+    使用 OpenRouter API 生成单条对话。
+    以 idx 作为随机种子保证可复现性。
+
+    返回包含 messages 和 metadata（话题/人设/动态）的字典。
     """
     # Use idx as seed for reproducibility
     rng = random.Random(idx)
@@ -381,7 +385,7 @@ def generate_conversation(idx: int):
 
 
 def validate_conversation(messages):
-    """Validate conversation structure."""
+    """验证对话结构：至少 2 条消息、严格交替、无空内容。"""
     if len(messages) < 2:
         raise ValueError(f"Conversation too short: {len(messages)} messages")
 
@@ -397,7 +401,7 @@ def validate_conversation(messages):
 
 
 # =============================================================================
-# MAIN
+# 主程序
 # =============================================================================
 
 if __name__ == "__main__":

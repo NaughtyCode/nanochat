@@ -1,14 +1,13 @@
 """
-Engine for efficient inference of our models.
+高效的模型推理引擎。
 
-Everything works around token sequences:
-- The user can send token sequences to the engine
-- The engine returns the next token
+一切围绕 token 序列工作：
+- 用户可以向引擎发送 token 序列
+- 引擎返回下一个 token
 
-Notes:
-- The engine knows nothing about tokenization, it's purely token id sequences.
-
-The whole thing is made as efficient as possible.
+注意事项：
+- 引擎对分词一无所知，纯粹处理 token ID 序列。
+- 整个设计尽可能高效。
 """
 
 import torch
@@ -21,9 +20,10 @@ from nanochat.common import compute_init, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 
 # -----------------------------------------------------------------------------
-# Calculator tool helpers
+# 计算器工具辅助函数（带超时和沙箱安全机制）
 @contextmanager
 def timeout(duration, formula):
+    """超时上下文管理器：限制 Python eval 执行时间"""
     def timeout_handler(signum, frame):
         raise Exception(f"'{formula}': timed out after {duration} seconds")
 
@@ -33,6 +33,7 @@ def timeout(duration, formula):
     signal.alarm(0)
 
 def eval_with_timeout(formula, max_time=3):
+    """在超时限制内安全执行 Python 表达式"""
     try:
         with timeout(max_time, formula):
             with warnings.catch_warnings():
@@ -40,30 +41,26 @@ def eval_with_timeout(formula, max_time=3):
                 return eval(formula, {"__builtins__": {}}, {})
     except Exception as e:
         signal.alarm(0)
-        # print(f"Warning: Failed to eval {formula}, exception: {e}") # it's ok ignore wrong calculator usage
         return None
 
 def use_calculator(expr):
-    """
-    Evaluate a Python expression safely.
-    Supports both math expressions and string operations like .count()
-    """
-    # Remove commas from numbers
+    """安全地执行 Python 表达式（数学和字符串操作）。
+    支持数学表达式（数字、运算符）和字符串方法（目前仅 .count()）。
+    禁止危险模式（import、exec、file 操作等）。"""
     expr = expr.replace(",", "")
 
-    # Check if it's a pure math expression (old behavior)
+    # 纯数学表达式（旧行为）
     if all([x in "0123456789*+-/.() " for x in expr]):
-        if "**" in expr:  # disallow power operator
+        if "**" in expr:  # 禁止幂运算符（防止内存爆炸）
             return None
         return eval_with_timeout(expr)
 
-    # Check if it's a string operation we support
-    # Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
+    # 字符串操作：仅允许安全字符
     allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ "
     if not all([x in allowed_chars for x in expr]):
         return None
 
-    # Disallow dangerous patterns
+    # 禁止危险模式
     dangerous_patterns = ['__', 'import', 'exec', 'eval', 'compile', 'open', 'file',
                          'input', 'raw_input', 'globals', 'locals', 'vars', 'dir',
                          'getattr', 'setattr', 'delattr', 'hasattr']
@@ -71,22 +68,21 @@ def use_calculator(expr):
     if any(pattern in expr_lower for pattern in dangerous_patterns):
         return None
 
-    # Only allow .count() method for now (can expand later)
+    # 目前仅允许 .count() 方法（后续可扩展）
     if '.count(' not in expr:
         return None
 
-    # Evaluate with timeout
     return eval_with_timeout(expr)
 
 # -----------------------------------------------------------------------------
 class KVCache:
-    """
-    KV Cache designed for Flash Attention 3's flash_attn_with_kvcache API.
+    """为 Flash Attention 3 的 flash_attn_with_kvcache API 设计的 KV 缓存。
 
-    Key differences from FA2-style cache:
-    - Tensors are (B, T, H, D) not (B, H, T, D)
-    - FA3 updates the cache in-place during flash_attn_with_kvcache
-    - Position tracked per batch element via cache_seqlens tensor
+    与 FA2 风格缓存的区别：
+    - 张量形状为 (B, T, H, D) 而非 (B, H, T, D)
+    - FA3 在 flash_attn_with_kvcache 中原地更新缓存
+    - 通过 cache_seqlens 张量按批次元素跟踪位置
+    - prev_embedding 用于 Smear 机制的单 token 解码
     """
 
     def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device, dtype):
@@ -95,36 +91,35 @@ class KVCache:
         self.n_layers = num_layers
         self.n_heads = num_heads
         self.head_dim = head_dim
-        # Pre-allocate cache tensors: (n_layers, B, T, H, D)
+        # 预分配缓存张量: (n_layers, B, T, H, D)
         self.k_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
         self.v_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-        # Current sequence length per batch element (FA3 needs int32)
+        # 每个批次元素的当前序列长度（FA3 需要 int32 类型）
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
-        # Previous token's normalized embedding for smear (set by model forward pass)
+        # 上一个 token 的归一化嵌入（用于 Smear 机制的单 token 解码）
         self.prev_embedding = None
 
     def reset(self):
-        """Reset cache to empty state."""
+        """重置缓存为空状态"""
         self.cache_seqlens.zero_()
         self.prev_embedding = None
 
     def get_pos(self):
-        """Get current position (assumes all batch elements at same position)."""
+        """获取当前位置（假设所有批次元素位置相同）"""
         return self.cache_seqlens[0].item()
 
     def get_layer_cache(self, layer_idx):
-        """Return (k_cache, v_cache) views for a specific layer."""
+        """返回特定层的 (k_cache, v_cache) 视图"""
         return self.k_cache[layer_idx], self.v_cache[layer_idx]
 
     def advance(self, num_tokens):
-        """Advance the cache position by num_tokens."""
+        """将缓存位置推进 num_tokens"""
         self.cache_seqlens += num_tokens
 
     def prefill(self, other):
-        """
-        Copy cached KV from another cache into this one.
-        Used when we do batch=1 prefill and then want to generate multiple samples in parallel.
-        """
+        """将另一个缓存的 KV 复制到此缓存中。
+        用于 batch=1 预填充后生成多个并行样本的场景。
+        还会将 batch=1 的 prev_embedding 扩展到 num_samples。"""
         assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
         assert self.n_layers == other.n_layers and self.n_heads == other.n_heads and self.head_dim == other.head_dim
         assert self.max_seq_len >= other.max_seq_len
@@ -132,7 +127,6 @@ class KVCache:
         self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
         self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
         self.cache_seqlens.fill_(other_pos)
-        # Copy smear state: expand batch=1 prev_embedding to num_samples
         if other.prev_embedding is not None:
             self.prev_embedding = other.prev_embedding.expand(self.batch_size, -1, -1).clone()
 
@@ -158,23 +152,38 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
 # -----------------------------------------------------------------------------
 
 class RowState:
-    # Per-row state tracking during generation
+    """生成过程中每行的状态跟踪。
+    - current_tokens: 当前 token 序列
+    - forced_tokens: 待强制注入的 token 队列（工具调用结果）
+    - in_python_block: 是否在 Python 代码块内
+    - python_expr_tokens: 当前 Python 表达式的 token
+    - completed: 此行是否已完成生成
+    """
     def __init__(self, current_tokens=None):
-        self.current_tokens = current_tokens or [] # Current token sequence for this row
-        self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = [] # Tokens of the current python expression
-        self.completed = False # Whether this row has completed generation
+        self.current_tokens = current_tokens or []
+        self.forced_tokens = deque()
+        self.in_python_block = False
+        self.python_expr_tokens = []
+        self.completed = False
 
 class Engine:
+    """高效推理引擎：管理 KV 缓存、工具调用状态机和批量生成。
+    支持流式生成（generate）和非流式生成（generate_batch）。"""
 
     def __init__(self, model, tokenizer):
         self.model = model
-        self.tokenizer = tokenizer # needed for tool use
+        self.tokenizer = tokenizer
 
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+        """高效的批量推理生成器。
+        流程：
+        1. batch=1 预填充 prompt token → 获取 logits
+        2. 将 KV 缓存复制/扩展到 num_samples 份（避免重复预填充）
+        3. 主循环：采样 → 工具调用状态机 → 强制注入结果 → 前向传播
+        每次 yield (token_column, token_masks)：
+        - token_column: 每行下一个 token
+        - token_masks: 1=正常采样, 0=强制注入（工具结果）"""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
@@ -280,11 +289,11 @@ class Engine:
             logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):
-        """
-        Non-streaming batch generation that just returns the final token sequences.
-        Returns a list of token sequences (list of lists of ints).
-        Terminal tokens (assistant_end, bos) are not included in the results.
-        """
+        """非流式批量生成，返回最终的 token 序列。
+        返回 (results, masks)：
+        - results: token 序列列表（list of list of int）
+        - masks: 对应的掩码列表（1=采样, 0=强制注入）
+        终止 token（assistant_end, bos）不包含在结果中。"""
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
         bos = self.tokenizer.get_bos_token_id()
         results = [tokens.copy() for _ in range(num_samples)]

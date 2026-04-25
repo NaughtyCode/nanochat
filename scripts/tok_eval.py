@@ -1,5 +1,10 @@
 """
-Evaluate compression ratio of the tokenizer.
+评估分词器的压缩率。
+将 nanochat tokenizer 与 GPT-2 tokenizer（以及可选的 GPT-4/GPT-4.1 tokenizer）
+在多种文本类型（新闻、韩语、代码、中文）上进行对比。
+
+用法：
+  python -m scripts.tok_eval
 """
 
 from nanochat.tokenizer import get_tokenizer, RustBPETokenizer

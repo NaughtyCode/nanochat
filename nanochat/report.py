@@ -1,5 +1,9 @@
 """
-Utilities for generating training report cards. More messy code than usual, will fix.
+训练报告生成工具。
+从各阶段日志生成综合的训练报告卡片（markdown 格式），包括：
+- 环境信息（Git、硬件、系统）
+- 模型指标汇总表（CORE、ChatCORE、GSM8K 等）
+- 总墙钟时间统计
 """
 
 import os

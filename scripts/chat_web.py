@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 """
-Unified web chat server - serves both UI and API from a single FastAPI instance.
+统一的 Web Chat 服务器 — 通过单个 FastAPI 实例同时提供 UI 和 API。
 
-Uses data parallelism to distribute requests across multiple GPUs. Each GPU loads
-a full copy of the model, and incoming requests are distributed to available workers.
+使用数据并行在多 GPU 上分发请求。每个 GPU 加载一份完整的模型副本，
+传入请求分发到可用的 worker。
 
-Launch examples:
+端点：
+  GET  /                - Chat UI（浏览器界面）
+  POST /chat/completions - Chat API（仅流式，SSE）
+  GET  /health          - 健康检查（含 worker 池状态）
+  GET  /stats           - Worker 池统计和 GPU 利用率
 
-- single available GPU (default)
-python -m scripts.chat_web
+防滥用措施：
+  - 每个请求最多 500 条消息
+  - 每条消息最多 8000 字符
+  - 对话总长度最多 32000 字符
+  - Temperature 限制在 0.0-2.0
+  - Top-k 限制在 0-200
+  - Max tokens 限制在 1-4096
 
-- 4 GPUs
-python -m scripts.chat_web --num-gpus 4
-
-To chat, open the URL printed in the console. (If on cloud box, make sure to use public IP)
-
-Endpoints:
-  GET  /           - Chat UI
-  POST /chat/completions - Chat API (streaming only)
-  GET  /health     - Health check with worker pool status
-  GET  /stats      - Worker pool statistics and GPU utilization
-
-Abuse Prevention:
-  - Maximum 500 messages per request
-  - Maximum 8000 characters per message
-  - Maximum 32000 characters total conversation length
-  - Temperature clamped to 0.0-2.0
-  - Top-k clamped to 0-200 (0 disables top-k filtering, using full vocabulary)
-  - Max tokens clamped to 1-4096
+用法：
+  python -m scripts.chat_web              # 单 GPU
+  python -m scripts.chat_web --num-gpus 4  # 4 GPU 多 Worker
 """
 
 import argparse

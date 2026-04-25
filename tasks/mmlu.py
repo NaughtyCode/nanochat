@@ -1,5 +1,6 @@
 """
-The MMLU dataset.
+MMLU 数据集（Massive Multitask Language Understanding）。
+覆盖 57 个学科，多项选择格式（A/B/C/D），评估类型为 categorical。
 https://huggingface.co/datasets/cais/mmlu
 """
 

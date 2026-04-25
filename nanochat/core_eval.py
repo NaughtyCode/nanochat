@@ -1,9 +1,13 @@
 """
-Functions for evaluating the CORE metric, as described in the DCLM paper.
+CORE 指标评估函数，来自 DCLM 论文：
 https://arxiv.org/abs/2406.11794
 
-TODOs:
-- All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
+支持三种任务类型：
+- multiple_choice: 多项选择（通过选项的平均损失比较）
+- schema: 模式匹配（不同上下文，相同续写）
+- language_modeling: 语言建模（精确匹配续写 token）
+
+使用 Jinja2 模板进行 prompt 渲染，支持 few-shot 示例。
 """
 import random
 
@@ -143,10 +147,9 @@ def batch_sequences_lm(tokenizer, prompts):
 
 @torch.no_grad()
 def forward_model(model, input_ids):
-    """
-    Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
-    The last column of losses is set to nan because we don't have autoregressive targets there.
-    """
+    """前向传播并计算逐位置的 loss 和预测。
+    输入 B×T token IDs，返回 B×T 的 loss 和 argmax 预测。
+    最后一列的 loss 设为 nan（没有自回归目标）。"""
     batch_size, seq_len = input_ids.size()
     outputs = model(input_ids)
     # Roll the tensor to the left by one position to get the (autoregressive) target ids

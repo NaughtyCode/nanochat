@@ -1,7 +1,8 @@
 """
-Test Engine class. Example run:
+Engine 类的单元测试。
+测试 KV Cache、生成采样、多样本推理、温度控制等核心功能。
 
-python -m pytest tests/test_engine.py -v
+运行方式：python -m pytest tests/test_engine.py -v
 """
 
 import torch
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 
 @dataclass
 class MockConfig:
-    """Minimal config for Engine tests."""
+    """用于 Engine 测试的最小化配置，模拟 GPT 模型参数。"""
     n_kv_head: int = 4
     n_head: int = 4
     n_embd: int = 64
@@ -24,9 +25,11 @@ class MockConfig:
 
 class MockModel:
     """
-    Mock model that returns uniform logits over the vocab.
-    This ensures that with temperature > 0, different samples should
-    (with very high probability) produce different tokens.
+    模拟模型 — forward 返回均匀分布的 logits（所有 token 等概率）。
+
+    设计意图：使用 temperature > 0 采样时，不同样本有极高概率
+    产生不同的 token。如果所有样本 token 相同，说明存在广播 bug
+    （把同一个 token 复制到了所有样本行）。
     """
     def __init__(self, vocab_size=262):  # 256 bytes + 6 special tokens
         self.vocab_size = vocab_size
@@ -49,8 +52,10 @@ class MockModel:
 
 class ByteTokenizer:
     """
-    Simple byte-level tokenizer for testing.
-    Tokens 0-255 are raw bytes, 256+ are special tokens.
+    用于测试的简化字节级分词器。
+
+    0-255 为原始字节，256+ 为特殊 token。
+    与真实 tokenizer 的接口兼容，但无需加载模型/词表。
     """
     def __init__(self):
         # Special tokens start at 256
@@ -82,7 +87,7 @@ class ByteTokenizer:
         return bytes(byte_tokens).decode("utf-8", errors="replace")
 
 def test_kv_cache_basic():
-    """Test basic KVCache functionality for FA3."""
+    """测试 KVCache 基本功能：初始化、advance、reset、get_layer_cache 视图。"""
     batch_size = 2
     num_heads = 3
     seq_len = 64
@@ -122,7 +127,7 @@ def test_kv_cache_basic():
 
 
 def test_kv_cache_prefill():
-    """Test KVCache.prefill() copies data correctly."""
+    """测试 KVCache.prefill()：源 cache 的数据能正确复制到目标 cache。"""
     batch_size = 1
     num_heads = 4
     head_dim = 8
@@ -157,16 +162,14 @@ def test_kv_cache_prefill():
 
 def test_multi_sample_first_token_diversity():
     """
-    Test that when generating multiple samples, each sample gets an independently
-    sampled first token (not a broadcast of the same token to all rows).
+    回归测试：验证多样本生成时，每个样本的第一个 token 是独立采样的。
 
-    Previously, the first token after prefill was sampled once and broadcast to all
-    rows, causing all samples to start identically. The fix expands the prefill logits
-    to num_samples and samples independently for each row.
+    早期 bug：prefill 后的第一个 token 只采样一次然后广播到所有行，
+    导致所有样本起始完全相同。修复后将 prefill logits 扩展到 num_samples
+    并为每行独立采样。
 
-    With uniform logits over 262 tokens and 16 samples, the probability that all
-    samples independently pick the same token is (1/262)^15 ≈ 10^-36. So if they're
-    all identical, it indicates tokens are being broadcast instead of independently sampled.
+    在 262 词表的均匀分布下，16 个样本全部独立取到同一 token 的概率
+    约为 (1/262)^15 ≈ 10^-36，因此如果所有样本 token 相同即可判定 bug 存在。
     """
     model = MockModel(vocab_size=262)
     tokenizer = ByteTokenizer()
@@ -199,7 +202,7 @@ def test_multi_sample_first_token_diversity():
 
 
 def test_seed_reproducibility():
-    """Same seed must produce identical output."""
+    """相同 seed 必须产生完全相同的输出（确定性验证）。"""
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]  # <bos> + "Hello"
@@ -212,7 +215,7 @@ def test_seed_reproducibility():
 
 
 def test_temperature_zero_determinism():
-    """Temperature=0 is deterministic regardless of seed."""
+    """temperature=0 是确定性解码，与 seed 无关。"""
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]
@@ -224,7 +227,7 @@ def test_temperature_zero_determinism():
 
 
 def test_max_tokens_respected():
-    """Generation stops at max_tokens limit."""
+    """生成 token 数不超过 max_tokens 限制。"""
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]
@@ -236,7 +239,7 @@ def test_max_tokens_respected():
 
 
 def test_num_samples_count():
-    """num_samples=N produces exactly N sequences."""
+    """num_samples=N 应生成恰好 N 条序列。"""
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]
@@ -247,7 +250,7 @@ def test_num_samples_count():
 
 
 def test_different_seeds_introduce_variation_when_temperature_nonzero():
-    """With temperature > 0, different seeds should introduce sampling variation."""
+    """temperature > 0 时不同 seed 应引入采样变化（统计合理性验证）。"""
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]  # <bos> + "Hello"

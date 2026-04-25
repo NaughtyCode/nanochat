@@ -1,5 +1,6 @@
 """
-Utilities for saving and loading model/optim/state checkpoints.
+模型/优化器/状态 checkpoint 的保存和加载工具。
+支持向后兼容（自动修补旧 checkpoint 中缺失的配置键和参数）。
 """
 import os
 import re
@@ -21,37 +22,36 @@ def log0(message):
         logger.info(message)
 
 def _patch_missing_config_keys(model_config_kwargs):
-    """Add default values for new config keys missing in old checkpoints."""
-    # Old models were trained with full context (no sliding window)
+    """向后兼容：为旧 checkpoint 中缺失的配置键添加默认值。
+    旧模型使用全上下文训练（无滑动窗口），因此 window_pattern 默认为 "L"。"""
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
 
 def _patch_missing_keys(model_data, model_config):
-    """Add default values for new parameters that may be missing in old checkpoints."""
+    """向后兼容：为旧 checkpoint 中可能缺失的新参数添加默认值。
+    resid_lambdas 默认为 1.0（恒等缩放），
+    x0_lambdas 默认为 0.0（禁用）。"""
     n_layer = model_config.n_layer
-    # resid_lambdas defaults to 1.0 (identity scaling)
     if "resid_lambdas" not in model_data:
         model_data["resid_lambdas"] = torch.ones(n_layer)
         log0(f"Patching missing resid_lambdas in model data to 1.0")
-    # x0_lambdas defaults to 0.0 (disabled)
     if "x0_lambdas" not in model_data:
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+    """保存 checkpoint。模型数据仅 rank 0 保存，optimizer 按 rank 分片保存。"""
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        # Save the model state parameters
         model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
         torch.save(model_data, model_path)
         logger.info(f"Saved model parameters to: {model_path}")
-        # Save the metadata dict as json
         meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
-    # Note that optimizer state is sharded across ranks, so each rank must save its own.
+    # 优化器状态跨 rank 分片，每个 rank 保存自己的分片
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
@@ -59,15 +59,13 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
-    # Load the model state
+    """加载 checkpoint：模型参数、可选的优化器状态和元数据。"""
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
     model_data = torch.load(model_path, map_location=device)
-    # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         optimizer_data = torch.load(optimizer_path, map_location=device)
-    # Load the metadata
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_data = json.load(f)
@@ -75,42 +73,35 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
 
 
 def build_model(checkpoint_dir, step, device, phase):
-    """
-    A bunch of repetitive code to build a model from a given checkpoint.
-    Returns:
-    - base model - uncompiled, not wrapped in DDP
-    - tokenizer
-    - meta data saved during base model training
-    """
+    """从给定 checkpoint 构建模型。
+    返回: (未编译的 base model、tokenizer、元数据)。
+    处理向后兼容性修补、torch.compile 键修复、CPU/MPS 的 bf16→fp32 转换。"""
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
     if device.type in {"cpu", "mps"}:
-        # Convert bfloat16 tensors to float for CPU inference
+        # CPU/MPS 推理时将 bfloat16 张量转换为 float
         model_data = {
             k: v.float() if v.dtype == torch.bfloat16 else v
             for k, v in model_data.items()
         }
-    # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
+    # 修复 torch.compile 问题：移除 _orig_mod. 前缀
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
     _patch_missing_config_keys(model_config_kwargs)
     log0(f"Building model with config: {model_config_kwargs}")
     model_config = GPTConfig(**model_config_kwargs)
     _patch_missing_keys(model_data, model_config)
+    # 在 meta device 上创建模型外壳，然后分配实际内存
     with torch.device("meta"):
         model = GPT(model_config)
-    # Load the model state
     model.to_empty(device=device)
-    model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
+    model.init_weights()  # 需要初始化旋转编码等缓冲区
     model.load_state_dict(model_data, strict=True, assign=True)
-    # Put the model in the right training phase / mode
     if phase == "eval":
         model.eval()
     else:
         model.train()
-    # Load the Tokenizer
     tokenizer = get_tokenizer()
-    # Sanity check: compatibility between model and tokenizer
     assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"], f"Tokenizer vocab size {tokenizer.get_vocab_size()} does not match model config vocab size {model_config_kwargs['vocab_size']}"
     return model, tokenizer, meta_data
 

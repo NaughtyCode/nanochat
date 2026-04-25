@@ -1,5 +1,7 @@
 """
-The ARC dataset from Allen AI.
+ARC 数据集（AI2 Reasoning Challenge），来自 Allen AI。
+包含 ARC-Easy 和 ARC-Challenge 两个子集。
+多项选择格式，评估类型为 categorical。
 https://huggingface.co/datasets/allenai/ai2_arc
 """
 

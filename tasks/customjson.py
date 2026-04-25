@@ -1,6 +1,13 @@
 """
-CustomJSON task for loading conversations from JSONL files.
-Each line in the JSONL file should be a JSON array of messages.
+CustomJSON 任务：从 JSONL 文件加载对话数据，用于 SFT 训练。
+
+每行是一个 JSON 数组，包含交替的 user/assistant 消息对象。
+示例行：[{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"}]
+
+典型用途：
+- 加载身份对话数据（identity_conversations.jsonl）
+- 加载自定义合成数据
+- 加载任何 JSONL 格式的对话语料
 """
 
 import os
@@ -9,9 +16,16 @@ from tasks.common import Task
 
 class CustomJSON(Task):
     """
-    Load conversations from a JSONL file.
-    Each line should be a JSON array of message objects with 'role' and 'content' fields.
-    Example line: [{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"}]
+    从 JSONL 文件加载对话。
+
+    文件格式要求：
+    - 每行一个 JSON 数组
+    - 消息对象包含 'role' 和 'content' 字段
+    - user 和 assistant 必须严格交替出现
+    - 至少包含 2 条消息（一问一答）
+    - content 必须是字符串类型
+
+    加载时进行结构校验，遇到格式错误会直接断言失败。
     """
 
     def __init__(self, filepath, **kwargs):

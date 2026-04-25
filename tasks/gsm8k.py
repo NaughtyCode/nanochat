@@ -1,17 +1,9 @@
 """
-GSM8K evaluation.
+GSM8K 数学推理数据集。
 https://huggingface.co/datasets/openai/gsm8k
 
-Example problem instance:
-
-Question:
-Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?
-Answer:
-Weng earns 12/60 = $<<12/60=0.2>>0.2 per minute.
-Working 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.
-#### 10
-
-Notice that GSM8K uses tool calls inside << >> tags.
+评估类型为 generative。使用 #### 标记提取最终数值答案。
+支持 tool use（Python 计算器 << >> 标签）和 0-1 reward（RL 训练）。
 """
 
 import re

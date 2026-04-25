@@ -1,6 +1,11 @@
 """
-Train a tokenizer using our own BPE Tokenizer library.
-In the style of GPT-4 tokenizer.
+训练 BPE 分词器（GPT-4 风格）。
+
+使用 ClimbMix 数据训练 RustBPETokenizer，默认词汇量 32768。
+同时计算并保存每个 token 的字节数（token_bytes）供 BPB 评估使用。
+
+用法：
+  python -m scripts.tok_train
 """
 import os
 import time

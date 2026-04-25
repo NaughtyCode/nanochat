@@ -1,14 +1,17 @@
 """
-Train model. From root directory of the project, run as:
+预训练基础模型的主入口脚本。
 
-python -m scripts.base_train
+用法：
+  python -m scripts.base_train                     # 单 GPU 训练
+  torchrun --nproc_per_node=8 -m scripts.base_train # 8 GPU 分布式训练
+  python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1  # CPU/小型 实验
 
-or distributed as:
-
-torchrun --nproc_per_node=8 -m scripts.base_train
-
-If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
-python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 --total-batch-size=512 --num-iterations=20
+支持特性：
+  - FP8 训练（需要 H100+ GPU）
+  - 缩放定律驱动的自动 batch size / 迭代次数计算
+  - MuonAdamW 优化器（矩阵参数用 Muon，嵌入/标量用 AdamW）
+  - 滑动窗口注意力模式配置
+  - CORE 指标评估、BPB 损失评估、模型采样
 """
 
 import os

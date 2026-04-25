@@ -1,23 +1,18 @@
 """
-Unified evaluation script for base models.
+基础模型统一评估脚本。
 
-Supports three evaluation modes (comma-separated):
-  --eval core    : CORE metric (accuracy on ICL tasks)
-  --eval bpb     : Bits per byte on train/val splits
-  --eval sample  : Generate samples from the model
+支持三种评估模式（逗号分隔）：
+  --eval core    : CORE 指标（在 ICL 任务上的准确率）
+  --eval bpb     : train/val 分片的 BPB（Bits Per Byte）
+  --eval sample  : 模型文本生成采样
 
-Default is all three: --eval core,bpb,sample
+默认全部执行: --eval core,bpb,sample
+同时支持 nanochat 自有模型和 HuggingFace 模型（如 GPT-2）。
 
-Examples:
-
-    # Evaluate a HuggingFace model (e.g. GPT-2 124M) using 8 GPUs
-    torchrun --nproc_per_node=8 -m scripts.base_eval --hf-path openai-community/gpt2
-
-    # Evaluate a nanochat model (e.g. d24) using 8 GPUs
-    torchrun --nproc_per_node=8 -m scripts.base_eval --model-tag d24 --device-batch-size=16
-
-    # Quick/approximate evaluation using a single GPU
-    python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
+用法：
+  torchrun --nproc_per_node=8 -m scripts.base_eval --hf-path openai-community/gpt2
+  torchrun --nproc_per_node=8 -m scripts.base_eval --model-tag d24 --device-batch-size=16
+  python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100
 """
 import os
 import csv

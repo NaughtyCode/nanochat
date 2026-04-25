@@ -1,8 +1,9 @@
 """
-Base class for all Tasks.
-A Task is basically a dataset of conversations, together with some
-metadata and often also evaluation criteria.
-Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
+所有 Task 的基类。
+Task 本质上是对话数据集 + 元数据 + 评估标准。
+示例 tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk。
+
+支持轻量级逻辑切片（start/stop/step）以及 TaskMixture（随机混合多个 task）和 TaskSequence。
 """
 
 import random

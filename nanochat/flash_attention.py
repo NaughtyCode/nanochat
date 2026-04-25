@@ -1,16 +1,16 @@
 """
-Unified Flash Attention interface with automatic FA3/SDPA switching.
+统一的 Flash Attention 接口，支持自动 FA3/SDPA 切换。
 
-Exports `flash_attn` module that matches the FA3 API exactly, but falls back
-to PyTorch SDPA on non-Hopper GPUs (including Blackwell), MPS, and CPU.
+导出 `flash_attn` 模块，API 与 FA3 完全匹配，但在非 Hopper GPU（包括 Blackwell）、
+MPS 和 CPU 上自动回退到 PyTorch SDPA。
 
-Usage (drop-in replacement for FA3):
+使用方式（FA3 的直接替代）：
     from nanochat.flash_attention import flash_attn
 
-    # Training (no KV cache)
+    # 训练（无 KV 缓存）
     y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
 
-    # Inference (with KV cache)
+    # 推理（带 KV 缓存）
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
 import torch
@@ -21,13 +21,12 @@ import torch.nn.functional as F
 # Detection: Try to load FA3 on Hopper+ GPUs
 # =============================================================================
 def _load_flash_attention_3():
-    """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
+    """尝试加载 Flash Attention 3（仅 Hopper GPU sm90 支持）。
+    Ada (sm89) 和 Blackwell (sm100) 需要 FA3 重新编译，当前使用 SDPA 回退。"""
     if not torch.cuda.is_available():
         return None
     try:
         major, _ = torch.cuda.get_device_capability()
-        # FA3 kernels are compiled for Hopper (sm90) only
-        # Ada (sm89), Blackwell (sm100) need SDPA fallback until FA3 is recompiled
         if major != 9:
             return None
         import os
@@ -46,14 +45,14 @@ _override_impl = None
 
 
 def _resolve_use_fa3():
-    """Decide once whether to use FA3, based on availability, override, and dtype."""
+    """基于可用性、覆盖设置和 dtype 决定是否使用 FA3。
+    FA3 Hopper 内核仅支持 bf16 和 fp8；fp16/fp32 必须使用 SDPA 回退。"""
     if _override_impl == 'fa3':
         assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
         return True
     if _override_impl == 'sdpa':
         return False
     if HAS_FA3:
-        # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
         from nanochat.common import COMPUTE_DTYPE
         if COMPUTE_DTYPE == torch.bfloat16:
             return True
@@ -67,9 +66,11 @@ USE_FA3 = _resolve_use_fa3()
 # SDPA helpers
 # =============================================================================
 def _sdpa_attention(q, k, v, window_size, enable_gqa):
-    """
-    SDPA attention with sliding window support.
-    q, k, v are (B, H, T, D) format.
+    """SDPA 注意力（支持滑动窗口）。
+    q, k, v 为 (B, H, T, D) 格式。
+    - 全上下文 + 等长：直接使用 is_causal
+    - 单 token 解码：截取窗口内的 KV
+    - 分块推理（Tq ≠ Tk）：构造显式 bool 掩码，同时支持滑动窗口
     """
     Tq = q.size(2)
     Tk = k.size(2)
@@ -105,17 +106,9 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
 # Public API: Same interface as FA3
 # =============================================================================
 def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
-    """
-    Flash Attention for training (no KV cache).
-
-    Args:
-        q, k, v: Tensors of shape (B, T, H, D)
-        causal: Whether to use causal masking
-        window_size: (left, right) sliding window. -1 means unlimited.
-
-    Returns:
-        Output tensor of shape (B, T, H, D)
-    """
+    """Flash Attention 训练接口（无 KV 缓存）。
+    q, k, v 形状为 (B, T, H, D)。返回形状为 (B, T, H, D) 的输出张量。
+    DA3 使用 (B, T, H, D) 原生布局，SDPA 需要转置为 (B, H, T, D) 再转回。"""
     if USE_FA3:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
@@ -130,22 +123,14 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
 
 def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None,
                             causal=False, window_size=(-1, -1)):
-    """
-    Flash Attention with KV cache for inference.
-
-    FA3 updates k_cache/v_cache in-place. Our SDPA fallback does the same.
-
-    Args:
-        q: Queries, shape (B, T_new, H, D)
-        k_cache, v_cache: Pre-allocated cache tensors, shape (B, T_max, H_kv, D)
-        k, v: New keys/values to insert, shape (B, T_new, H_kv, D)
-        cache_seqlens: Current position in cache, shape (B,) int32
-        causal: Whether to use causal masking
-        window_size: (left, right) sliding window. -1 means unlimited.
-
-    Returns:
-        Output tensor of shape (B, T_new, H, D)
-    """
+    """Flash Attention 推理接口（带 KV 缓存）。
+    FA3 原地更新 k_cache/v_cache。SDPA 回退方案也做到了这一点。
+    - q: 查询，形状 (B, T_new, H, D)
+    - k_cache, v_cache: 预分配的缓存张量，形状 (B, T_max, H_kv, D)
+    - k, v: 要插入的新 key/value，形状 (B, T_new, H_kv, D)
+    - cache_seqlens: 缓存中的当前位置，形状 (B,) int32
+    - window_size: (left, right) 滑动窗口。 -1 表示无限制。
+    返回形状为 (B, T_new, H, D) 的输出张量。"""
     if USE_FA3:
         return _fa3.flash_attn_with_kvcache(
             q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,

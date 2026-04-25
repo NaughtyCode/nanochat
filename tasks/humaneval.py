@@ -1,7 +1,13 @@
 """
-Evaluate the Chat model on HumanEval dataset.
-Btw this dataset is a misnomer and has nothing to do with humans.
-It is a coding benchmark.
+在 HumanEval 数据集上评估 Chat 模型。
+注意：这个数据集的名字有误导性，和"人类"无关——
+它是一个编程能力基准测试（coding benchmark）。
+
+评估流程：
+1. 从模型补全中提取 Python 代码（支持 ```python``` 代码块）
+2. 自动提取 prompt 中的 import 语句并前置到补全代码前
+3. 拼接完整程序：imports + 补全代码 + 测试用例 + check(entry_point)
+4. 在沙箱中执行代码，根据测试结果返回成功/失败
 """
 
 import re
@@ -10,7 +16,7 @@ from nanochat.execution import execute_code
 from tasks.common import Task
 
 def extract_imports(prompt):
-    """Extract import statements from the beginning of a code block."""
+    """从代码块开头提取 import 语句。遇到第一个非 import/非注释行即停止。"""
     imports = []
     for line in prompt.split('\n'):
         stripped = line.strip()
@@ -23,14 +29,14 @@ def extract_imports(prompt):
 
 def extract_program(completion):
     """
-    Extract Python code from LLM completion.
+    从 LLM 补全中提取 Python 代码。
 
-    Handles various output formats:
-    - Code wrapped in ```python ... ``` or ``` ... ``` blocks
-    - Plain code without markdown blocks
-    - Extra text before/after code blocks
+    处理多种输出格式：
+    - ```python ... ``` 或 ``` ... ``` 包裹的代码块
+    - 无 markdown 标记的纯代码
+    - 代码块前后的额外文字
 
-    Returns the first code block if found, otherwise returns the whole completion.
+    返回找到的第一个代码块，如果没有则返回整个补全文本。
     """
     # Try to find markdown code blocks (```python or just ```)
     # Match ```python\n...\n``` or ```\n...\n```

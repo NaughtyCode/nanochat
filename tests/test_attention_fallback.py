@@ -1,17 +1,27 @@
 """
-Test Flash Attention unified interface - verify FA3 and SDPA produce identical results.
+Flash Attention 统一接口测试 — 验证 FA3（Flash Attention 3）与 SDPA 产生相同结果。
 
-Run: python -m pytest tests/test_attention_fallback.py -v -s
+运行：python -m pytest tests/test_attention_fallback.py -v -s
 
-Note on test structure:
-    Tests are split into two classes due to dtype/device constraints:
+测试结构说明：
+    测试分为三个类，受 dtype/device 约束：
 
-    1. TestFA3VsSDPA: Comparison tests that run both FA3 and SDPA on the same inputs
-       and verify they produce identical results. These require a Hopper GPU (FA3 only
-       works on sm90+) and use bfloat16 (FA3 doesn't support float32).
+    1. TestFA3VsSDPA — 对比测试，在相同输入上分别运行 FA3 和 SDPA，
+       验证两者输出一致。需要 Hopper GPU（FA3 仅支持 sm90+），
+       使用 bfloat16（FA3 不支持 float32）。
 
-    2. TestSDPAOnly: Tests that only exercise the SDPA fallback path. These can run
-       on any device (CUDA, CPU, MPS) with the appropriate dtype for that device.
+    2. TestSDPAOnly — 仅测试 SDPA 回退路径，可在任何设备（CUDA/CPU/MPS）
+       上运行，使用对应设备支持的 dtype。
+
+    3. TestOverrideMechanism — 测试实现选择机制（override/auto 切换）。
+
+覆盖的测试场景：
+    - 基本因果注意力、全上下文、滑动窗口
+    - GQA（Group Query Attention）：KV 头数少于 Q 头数
+    - 更接近真实模型的大维度
+    - KV Cache 场景：prefill（多 token 写入空 cache）、单 token decode
+    - 滑动窗口 decode（曾发现 SDPA 在单 token 时忽略 window_size 的 bug）
+    - 反向传播梯度一致性
 """
 import torch
 import pytest
@@ -50,13 +60,13 @@ def assert_close(t1, t2, name, atol=1e-2, rtol=1e-2):
 # =============================================================================
 @pytest.mark.skipif(not HAS_FA3, reason="FA3 required to compare implementations")
 class TestFA3VsSDPA:
-    """Compare FA3 and SDPA produce identical results. Requires Hopper GPU."""
+    """对比 FA3 与 SDPA 产生相同结果。需要 Hopper GPU (sm90+)。"""
 
     DEVICE = "cuda"
     DTYPE = torch.bfloat16
 
     def test_basic_causal(self):
-        """Basic causal attention."""
+        """基本因果注意力测试。"""
         B, T, H, D = 2, 64, 4, 32
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
         k = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -70,7 +80,7 @@ class TestFA3VsSDPA:
         print(f"basic_causal: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_full_context(self):
-        """Full context (window_size=-1)."""
+        """全上下文注意力（window_size=-1，无窗口限制）。"""
         B, T, H, D = 2, 128, 4, 32
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
         k = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -84,7 +94,7 @@ class TestFA3VsSDPA:
         print(f"full_context: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_sliding_window(self):
-        """Sliding window attention."""
+        """滑动窗口注意力 — 每个 token 只能关注前 window 个 token。"""
         B, T, H, D = 2, 128, 4, 32
         window = 32
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -99,7 +109,7 @@ class TestFA3VsSDPA:
         print(f"sliding_window: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_gqa(self):
-        """Group Query Attention (fewer KV heads than Q heads)."""
+        """分组查询注意力（GQA）：KV 头数（2）少于 Q 头数（8）。"""
         B, T, D = 2, 64, 32
         n_heads = 8
         n_kv_heads = 2
@@ -116,7 +126,7 @@ class TestFA3VsSDPA:
         print(f"gqa: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_larger_model(self):
-        """Larger dimensions closer to real model."""
+        """更接近真实模型的维度（12 头、64 维、256 序列长）。"""
         B, T, H, D = 4, 256, 12, 64
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
         k = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -130,7 +140,7 @@ class TestFA3VsSDPA:
         print(f"larger_model: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_kvcache_prefill(self):
-        """Test prefill (inserting multiple tokens into empty cache)."""
+        """测试 prefill：将多个 token 一次性写入空 KV Cache。"""
         B, T_max, H, D = 2, 64, 4, 32
         T_prefill = 16
 
@@ -153,7 +163,7 @@ class TestFA3VsSDPA:
         print(f"prefill: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_kvcache_single_token(self):
-        """Test single token generation (cache already has content)."""
+        """测试单 token 逐 token 生成（cache 中已有内容）。"""
         B, T_max, H, D = 2, 64, 4, 32
         T_prefill = 16
 
@@ -180,11 +190,12 @@ class TestFA3VsSDPA:
         print(f"single_token: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_kvcache_single_token_sliding_window(self):
-        """Test single token decode with sliding window smaller than cache size.
+        """
+        回归测试：单 token 解码时滑动窗口正确性。
 
-        This catches the bug where SDPA ignores window_size during Tq=1 decode.
-        When window < Tk, FA3 only attends to the last (window+1) tokens,
-        but SDPA was attending to all cached tokens.
+        曾发现 bug：SDPA 在 Tq=1 的 decode 阶段忽略了 window_size 参数，
+        导致单 token 时仍关注所有缓存 token（而非仅关注窗口内的）。
+        当 window=8 远小于 T_prefill=32 时，FA3 和 SDPA 的输出应有显著差异。
         """
         B, T_max, H, D = 2, 64, 4, 32
         T_prefill = 32  # Enough tokens to exceed window
@@ -213,7 +224,7 @@ class TestFA3VsSDPA:
         print(f"single_token_sliding_window: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     def test_backward_gradients_match(self):
-        """Verify gradients are similar between FA3 and SDPA."""
+        """验证 FA3 与 SDPA 反向传播的梯度一致（较高容差 0.05）。"""
         B, T, H, D = 2, 32, 4, 16
 
         q_data = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -252,13 +263,13 @@ class TestFA3VsSDPA:
 # SDPA-only tests (run on any device)
 # =============================================================================
 class TestSDPAOnly:
-    """Test SDPA fallback works correctly. Runs on any device."""
+    """仅测试 SDPA 回退路径。可在任何设备上运行。"""
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     def test_basic_forward(self):
-        """Test SDPA forward pass produces valid output."""
+        """测试 SDPA 前向传播产生有效输出（无 NaN）。"""
         set_impl('sdpa')
         B, T, H, D = 2, 64, 4, 32
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -272,7 +283,7 @@ class TestSDPAOnly:
         set_impl(None)
 
     def test_backward(self):
-        """Test gradients flow through SDPA."""
+        """测试 SDPA 反向传播：梯度存在且无 NaN。"""
         set_impl('sdpa')
         B, T, H, D = 2, 32, 4, 16
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE, requires_grad=True)
@@ -290,7 +301,7 @@ class TestSDPAOnly:
         set_impl(None)
 
     def test_kvcache(self):
-        """Test SDPA with KV cache."""
+        """测试 SDPA 与 KVCache 的集成：prefill + 单 token decode。"""
         set_impl('sdpa')
         B, T_max, H, D = 2, 64, 4, 32
         n_layers = 1
@@ -338,23 +349,23 @@ class TestSDPAOnly:
 # Override mechanism tests
 # =============================================================================
 class TestOverrideMechanism:
-    """Test that the override mechanism works correctly."""
+    """测试实现选择机制：override='fa3'/'sdpa'/None(auto) 的切换。"""
 
     @pytest.mark.skipif(not HAS_FA3, reason="FA3 required")
     def test_override_fa3(self):
-        """Test that override='fa3' uses FA3."""
+        """override='fa3' 强制使用 FA3。"""
         set_impl('fa3')
         assert fa_module.USE_FA3 == True
         set_impl(None)
 
     def test_override_sdpa(self):
-        """Test that override='sdpa' uses SDPA."""
+        """override='sdpa' 强制使用 SDPA。"""
         set_impl('sdpa')
         assert fa_module.USE_FA3 == False
         set_impl(None)
 
     def test_override_auto(self):
-        """Test that override=None uses auto-detection."""
+        """override=None 使用自动检测（有 FA3 则用 FA3，否则 SDPA）。"""
         set_impl(None)
         assert fa_module.USE_FA3 == HAS_FA3
 

@@ -1,19 +1,16 @@
 """
-Distributed dataloaders for pretraining.
+预训练分布式数据加载器。
 
-BOS-aligned bestfit:
-   - Every row starts with BOS token
-   - Documents packed using best-fit algorithm to minimize cropping
-   - When no document fits remaining space, crops a document to fill exactly
-   - 100% utilization (no padding), ~35% tokens cropped at T=2048
+BOS 对齐 + 最佳匹配（Best-Fit）打包策略：
+   - 每行以 BOS token 开头
+   - 使用最佳匹配算法打包文档以最小化截断
+   - 当没有文档能放入剩余空间时，截断最短文档以恰好填满
+   - 100% 利用率（无填充），在 T=2048 时约 35% 的 token 被截断
 
-Compared to the original tokenizing_distributed_data_loader:
-BOS-aligned loses ~35% of tokens to cropping, but ensures that
-there are fewer "confusing" tokens in the train/val batches as every token can
-now attend back to the BOS token and sees the full context of the document.
-
-Fallback to the original if you have very limited data AND long documents:
-https://github.com/karpathy/nanochat/blob/3c3a3d7/nanochat/dataloader.py#L78-L117
+相比原始的数据加载器：
+BOS 对齐损失约 35% 的 token（被截断），但确保训练/验证批次中
+更少出现"困惑"的 token，因为每个 token 现在可以回看到 BOS token
+并看到文档的完整上下文。
 """
 
 import torch
@@ -23,13 +20,10 @@ from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
-    """
-    Infinite iterator over document batches (list of text strings) from parquet files.
-
-    Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
-    where text_batch is a list of document strings, indices track position for resumption,
-    and epoch counts how many times we've cycled through the dataset (starts at 1).
-    """
+    """从 parquet 文件中无限迭代文档批次（文���字符串列表）。
+    处理 DDP 分片和近似恢复。每次 yield 返回 (text_batch, (pq_idx, rg_idx, epoch))，
+    其中 text_batch 是文档字符串列表，
+    索引用于恢复位置跟踪，epoch 从 1 开始计数数据集循环次数。"""
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
     warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
@@ -77,21 +71,20 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     device="cuda", resume_state_dict=None,
     buffer_size=1000
 ):
-    """
-    BOS-aligned dataloader with Best-Fit Cropping.
+    """BOS 对齐 + 最佳匹配截断（Best-Fit Cropping）的数据加载器。
 
-    Reduces token waste compared to simple greedy cropping by searching a buffer
-    for documents that fit well, while maintaining 100% utilization (no padding).
+    通过在缓冲区中搜索合适大小的文档来减少 token 浪费（相比简单贪心截断），
+    同时保持 100% 利用率（不填充）。
 
-    Algorithm for each row:
-    1. From buffered docs, pick the LARGEST doc that fits entirely
-    2. Repeat until no doc fits
-    3. When nothing fits, crop a doc to fill remaining space exactly
+    每行的算法：
+    1. 从缓冲文档中选出能完整放入的最大文档
+    2. 重复直到没有文档能放入
+    3. 当无文档能放入时，截断缓冲区中最短的文档恰好填满剩余空间
 
-    Key properties:
-    - Every row starts with BOS
-    - 100% utilization (no padding, every token is trained on)
-    - Approximately 35% of all tokens are discarded due to cropping
+    关键特性：
+    - 每行以 BOS 开头
+    - 100% 利用率（无填充，每个 token 都被训练）
+    - 约 35% 的 token 因截断而被丢弃
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 

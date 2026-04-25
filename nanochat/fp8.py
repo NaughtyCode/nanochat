@@ -1,72 +1,54 @@
-"""Minimal FP8 training for nanochat — tensorwise dynamic scaling only.
+"""nanochat 的轻量级 FP8 训练模块 — 仅使用张量级动态缩放。
 
-Drop-in replacement for torchao's Float8Linear (~2000 lines) with ~150 lines.
-We only need the "tensorwise" recipe (one scalar scale per tensor), not the full
-generality of torchao (rowwise scaling, FSDP float8 all-gather, DTensor, tensor
-subclass dispatch tables, etc.)
+用约 150 行代码替代 torchao 的 Float8Linear（约 2000 行）。
+我们只需要"tensorwise"方案（每个张量一个标量缩放），不需要 torchao 的全部通用性
+（行级缩放、FSDP float8 all-gather、DTensor、tensor subclass dispatch table 等）。
 
-How FP8 training works
-======================
-A standard Linear layer does one matmul in forward and two in backward:
+FP8 训练原理：
+标准 Linear 层执行 1 次前向矩阵乘法和 2 次反向：
   forward:      output     = input      @ weight.T
   backward:     grad_input = grad_output @ weight
                 grad_weight= grad_output.T @ input
 
-FP8 training wraps each of these three matmuls with:
-  1. Compute scale = FP8_MAX / max(|tensor|)  for each operand
-  2. Quantize: fp8_tensor = clamp(tensor * scale, -FP8_MAX, FP8_MAX).to(fp8)
-  3. Matmul via torch._scaled_mm (cuBLAS FP8 kernel, ~2x faster than bf16)
-  4. Dequantize: _scaled_mm handles this internally using the inverse scales
+FP8 训练对这三个矩阵乘法各做：
+  1. 计算 scale = FP8_MAX / max(|tensor|)
+  2. 量化：fp8_tensor = clamp(tensor * scale, -FP8_MAX, FP8_MAX).to(fp8)
+  3. 经由 torch._scaled_mm 执行矩阵乘法（cuBLAS FP8 内核，约比 bf16 快 2 倍）
+  4. 反量化：_scaled_mm 内部使用逆 scale 处理
 
-The key insight: torch._scaled_mm and the float8 dtypes are PyTorch built-ins.
-torchao is just orchestration around these primitives. We can call them directly.
+关键洞察：torch._scaled_mm 和 float8 dtype 是 PyTorch 内置功能。
+torchao 只是这些基元之上的编排层。我们可以直接调用它们。
 
-FP8 dtype choice
-================
-There are two FP8 formats. We use both, following the standard convention:
-  - float8_e4m3fn: 4-bit exponent, 3-bit mantissa, range [-448, 448]
-    Higher precision (more mantissa bits), used for input and weight.
-  - float8_e5m2:   5-bit exponent, 2-bit mantissa, range [-57344, 57344]
-    Wider range (more exponent bits), used for gradients which can be large.
+FP8 dtype 选择（遵循标准惯例）：
+  - float8_e4m3fn: 4 位指数，3 位尾数，范围 [-448, 448]
+    精度更高（更多尾数位），用于输入和权重。
+  - float8_e5m2:   5 位指数，2 位尾数，范围 [-57344, 57344]
+    范围更宽（更多指数位），用于可能很大的梯度。
 
-torch._scaled_mm layout requirements
-=====================================
-The cuBLAS FP8 kernel requires specific memory layouts:
-  - First argument (A):  must be row-major (contiguous)
-  - Second argument (B): must be column-major (B.t().contiguous().t())
-If B is obtained by transposing a contiguous tensor (e.g. weight.t()), it is
-already column-major — no copy needed. Otherwise we use _to_col_major().
+torch._scaled_mm 内存布局要求：
+  - 第一个参数 (A)：必须是行优先（contiguous）
+  - 第二个参数 (B)：必须是列优先（B.t().contiguous().t()）
+    如果 B 通过转置 contiguous 张量获得（如 weight.t()），则已经是列优先，无需复制。
 
-How this differs from torchao's approach
-========================================
-torchao uses a "tensor subclass" architecture: Float8TrainingTensor is a subclass
-of torch.Tensor that bundles FP8 data + scale + metadata. It implements
-__torch_dispatch__ with a dispatch table that intercepts every aten op (mm, t,
-reshape, clone, ...) and handles it in FP8-aware fashion. When you call
-  output = input @ weight.T
-the @ operator dispatches to aten.mm, which gets intercepted and routed to
-torch._scaled_mm behind the scenes. This is ~2000 lines of code because you need
-a handler for every tensor operation that might touch an FP8 tensor.
+与 torchao 方法的区别：
+torchao 使用"tensor subclass"架构：Float8TrainingTensor 是 torch.Tensor 的子类，
+将 FP8 数据 + scale + 元数据捆绑在一起。它实现 __torch_dispatch__ 并使用 dispatch table
+拦截每个 aten 操作（mm、t、reshape、clone 等），以 FP8 感知方式处理它们。
+这需要约 2000 行代码，因为每个可能触及 FP8 张量的操作都需要 handler。
 
-We take a simpler approach: a single autograd.Function (_Float8Matmul) that takes
-full-precision inputs, quantizes to FP8 internally, calls _scaled_mm, and returns
-full-precision outputs. Marked @allow_in_graph so torch.compile treats it as one
-opaque node rather than trying to trace inside.
+我们采用更简单的方法：单个 autograd.Function (_Float8Matmul)，
+接受全精度输入，内部量化为 FP8，调用 _scaled_mm，返回全精度输出。
+标记为 @allow_in_graph，使 torch.compile 将其视为单个不透明节点而非尝试追踪内部。
 
-The trade-off is in how torch.compile sees the two approaches:
-  - torchao: compile decomposes the tensor subclass (via __tensor_flatten__) and
-    sees every individual op (amax, scale, cast, _scaled_mm) as separate graph
-    nodes. Inductor can fuse these with surrounding operations (e.g. fuse the
-    amax computation with the preceding layer's activation function).
-  - ours: compile sees a single opaque call. It can optimize everything around
-    the FP8 linear (attention, norms, etc.) but cannot fuse across the boundary.
+权衡：
+  - torchao: compile 分解 tensor subclass，将每个操作（amax、scale、cast、_scaled_mm）
+    作为独立图节点，Inductor 可将这些与周围操作融合。
+  - ours: compile 看到单个不透明调用。可优化 FP8 linear 周围的一切但无法跨边界融合。
 
-Both call the exact same cuBLAS _scaled_mm kernel — the GPU matmul is identical.
-The difference is only in the "glue" ops (amax, scale, cast) which are tiny
-compared to the matmul. In practice this means our version is slightly faster
-(less compilation overhead, no tensor subclass dispatch cost) but can produce
-subtly different floating-point rounding paths under torch.compile, since Inductor
-generates a different graph. Numerics are bitwise identical in eager mode.
+两者调用完全相同的 cuBLAS _scaled_mm 内核 — GPU 矩阵乘法相同。
+差异仅在"粘合"操作（amax、scale、cast），相比矩阵乘法微不足道。
+我们的版本在实际中稍快（更少的编译开销，无 tensor subclass dispatch 成本），
+但在 torch.compile 下可能产生微妙不同的浮点舍入路径。eager 模式下数值完全相同。
 """
 
 import torch
@@ -80,40 +62,31 @@ EPS = 1e-12
 
 @torch.no_grad()
 def _to_fp8(x, fp8_dtype):
-    """Dynamically quantize a tensor to FP8 using tensorwise scaling.
-
-    "Tensorwise" means one scalar scale for the entire tensor (as opposed to
-    "rowwise" which computes a separate scale per row). Tensorwise is faster
-    because cuBLAS handles the scaling; rowwise needs the CUTLASS kernel.
-
-    Returns (fp8_data, inverse_scale) for use with torch._scaled_mm.
+    """将张量动态量化为 FP8（张量级缩放）。
+    "Tensorwise" 表示为整个张量使用一个标量缩放（与逐行缩放相对）。
+    Tensorwise 更快，因为 cuBLAS 直接处理缩放；逐行缩放需要 CUTLASS 内核。
+    返回 (fp8_data, inverse_scale) 供 torch._scaled_mm 使用。
     """
     fp8_max = torch.finfo(fp8_dtype).max
-    # Compute the max absolute value across the entire tensor
     amax = x.float().abs().max()
-    # Scale maps [0, amax] -> [0, fp8_max]. Use float64 for the division to
-    # ensure consistent numerics between torch.compile and eager mode.
-    # (torchao does the same upcast — without it, compile/eager can diverge)
+    # 将 [0, amax] 映射到 [0, fp8_max]
+    # 使用 float64 做除法以保证 torch.compile 与 eager 模式的数值一致性
     scale = fp8_max / amax.double().clamp(min=EPS)
     scale = scale.float()
-    # Quantize: scale into FP8 range, saturate (clamp prevents overflow when
-    # casting — PyTorch's default is to wrap, not saturate), then cast to FP8
+    # 量化：缩放到 FP8 范围 → 饱和截断（clamp 防止溢出，PyTorch 默认行为是回绕而非饱和）→ 转为 FP8
     x_scaled = x.float() * scale
     x_clamped = x_scaled.clamp(-fp8_max, fp8_max)
     x_fp8 = x_clamped.to(fp8_dtype)
-    # _scaled_mm expects the *inverse* of our scale (it multiplies by this to
-    # convert FP8 values back to the original range during the matmul)
+    # _scaled_mm 需要 scale 的*逆*（它在 matmul 中以此将 FP8 值转换回原始范围）
     inv_scale = scale.reciprocal()
     return x_fp8, inv_scale
 
 
 def _to_col_major(x):
-    """Rearrange a 2D tensor's memory to column-major layout.
-
-    torch._scaled_mm requires its second operand in column-major layout.
-    The trick: transpose -> contiguous (forces a copy in transposed order)
-    -> transpose back. The result has the same logical shape but column-major
-    strides, e.g. a [M, N] tensor gets strides (1, M) instead of (N, 1).
+    """将 2D 张量的内存重排为列优先布局。
+    torch._scaled_mm 要求第二个操作数为列优先。
+    技巧：t() → contiguous() → t()。
+    结果具有相同的逻辑形状，但为列优先步幅，例如 [M, N] 张量步幅变为 (1, M) 而非 (N, 1)。
     """
     return x.t().contiguous().t()
 
@@ -121,13 +94,10 @@ def _to_col_major(x):
 # allow_in_graph tells torch.compile to treat this as an opaque operation —
 # dynamo won't try to decompose it into smaller ops. See the module docstring
 # for how this differs from torchao's tensor subclass approach.
-@torch._dynamo.allow_in_graph
+@torch._dynamo.allow_in_graph  # 告知 torch.compile 将此视为不透明操作，不分解内部
 class _Float8Matmul(torch.autograd.Function):
-    """Custom autograd for the three FP8 GEMMs of a Linear layer.
-
-    The forward quantizes input and weight to FP8 and saves
-    the quantized tensors + scales for backward.
-    """
+    """Linear 层的三个 FP8 GEMM 的自定义 autograd。
+    forward 将 input 和 weight 量化为 FP8，保存量化张量 + scales 供 backward 使用。"""
 
     @staticmethod
     def forward(ctx, input_2d, weight):
@@ -193,17 +163,14 @@ class _Float8Matmul(torch.autograd.Function):
 
 
 class Float8Linear(nn.Linear):
-    """Drop-in nn.Linear replacement that does FP8 compute.
-
-    Weights and biases remain in their original precision (e.g. fp32/bf16).
-    Only the matmul is performed in FP8 via the _Float8Matmul autograd function.
-    """
+    """nn.Linear 的直接替换，在 FP8 中执行计算。
+    权重和偏置保持原始精度（如 fp32/bf16）。
+    仅矩阵乘法通过 _Float8Matmul autograd 函数在 FP8 中执行。"""
 
     def forward(self, input):
-        # Cast input to COMPUTE_DTYPE (typically bf16) since _scaled_mm expects
-        # reduced precision input, and we no longer rely on autocast to do this.
+        # 将 input 转换为 COMPUTE_DTYPE（通常为 bf16），因为 _scaled_mm 期望低精度输入
         input = input.to(COMPUTE_DTYPE)
-        # _scaled_mm only works on 2D tensors, so flatten batch dimensions
+        # _scaled_mm 仅支持 2D 张量，因此展平 batch 维度
         orig_shape = input.shape
         input_2d = input.reshape(-1, orig_shape[-1])
         output = _Float8Matmul.apply(input_2d, self.weight)
@@ -214,12 +181,9 @@ class Float8Linear(nn.Linear):
 
     @classmethod
     def from_float(cls, mod):
-        """Create Float8Linear from nn.Linear, sharing the same weight and bias.
-
-        Uses meta device to avoid allocating a temporary weight tensor — we
-        create the module shell on meta (shapes/dtypes only, no memory), then
-        point .weight and .bias to the original module's parameters.
-        """
+        """从 nn.Linear 创建 Float8Linear，共享相同的 weight 和 bias。
+        使用 meta device 避免分配临时权重张量：在 meta 上创建模块外壳（仅形状/dtype），
+        然后将 .weight 和 .bias 指向原始模块的参数。"""
         with torch.device("meta"):
             new_mod = cls(mod.in_features, mod.out_features, bias=False)
         new_mod.weight = mod.weight
@@ -228,7 +192,7 @@ class Float8Linear(nn.Linear):
 
 
 class Float8LinearConfig:
-    """Minimal config matching torchao's API. Only tensorwise recipe is supported."""
+    """与 torchao API 兼容的最小配置类。仅支持 tensorwise 方案。"""
 
     @staticmethod
     def from_recipe_name(recipe_name):
@@ -241,19 +205,10 @@ class Float8LinearConfig:
 
 
 def convert_to_float8_training(module, *, config=None, module_filter_fn=None):
-    """Replace nn.Linear layers with Float8Linear throughout a module.
-
-    Walks the module tree in post-order (children before parents) and swaps
-    each nn.Linear that passes the optional filter. The new Float8Linear shares
-    the original weight and bias tensors — no copies, no extra memory.
-
-    Args:
-        module: Root module to convert.
-        config: Float8LinearConfig (accepted for API compat, only tensorwise supported).
-        module_filter_fn: Optional filter(module, fqn) -> bool. Only matching Linears
-            are converted. Common use: skip layers with dims not divisible by 16
-            (hardware requirement for FP8 matmuls on H100).
-    """
+    """在整个模块中将 nn.Linear 层替换为 Float8Linear。
+    后序遍历模块树（子模块先于父模块），替换每个通过可选过滤器的 nn.Linear。
+    新的 Float8Linear 共享原始权重和偏置张量 — 无复制，无额外内存。
+    常用 filter：跳过维度不能被 16 整除的层（H100 上 FP8 matmul 的硬件要求）。"""
     def _convert(mod, prefix=""):
         for name, child in mod.named_children():
             fqn = f"{prefix}.{name}" if prefix else name

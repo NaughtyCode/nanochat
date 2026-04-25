@@ -1,27 +1,20 @@
 """
-Repackage a given dataset into simple parquet shards:
+将原始数据集重新打包为 Parquet shard 格式（参考/文档用途，非运行时使用）。
 
-- each shard is ~100MB in size (after zstd compression)
-- parquets are written with row group size of 1000
-- shuffle the dataset
+打包规格：
+- 每个 shard 约 100MB（zstd 压缩后）
+- row group 大小 1024（方便分布式 DataLoader）
+- 数据集已 shuffle
 
-This will be uploaded to HuggingFace for hosting.
-The big deal is that our DataLoader will be able to stream
-the data and cache it along the way on disk, decreasing the
-training latency.
+历史背景：
+nanochat 最初使用 FinewebEdu-100B 数据集，后切换到 ClimbMix-400B
+以获得更好的性能。本脚本记录了两个数据集的打包方式。
 
-Historical context:
-Originally, nanochat used the FinewebEdu-100B dataset.
-Then we switched to the ClimbMix-400B dataset due to superior performance.
-This script documents how both were prepared.
-
-The outputs are here:
-
+输出：
 https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle
 https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle
 
-NOTE: This file is meant only as reference/documentation of the
-dataset preparation and it is not used during the project runtime.
+注意：此文件仅作为数据处理流程的参考文档，不作为项目运行时的一部分。
 """
 import os
 import time
@@ -30,11 +23,11 @@ from datasets import load_dataset
 import pyarrow.parquet as pq
 import pyarrow as pa
 
-# You can change these:
+# 可修改的配置
 dataset_tag = "climbmix"
 upload_to_hf = True
 
-# Dataset configurations:
+# 数据集配置：
 if dataset_tag == "fineweb_edu":
     dataset_kwargs = {
         "path": "HuggingFaceFW/fineweb-edu",
@@ -47,7 +40,7 @@ if dataset_tag == "fineweb_edu":
     upload_tag = "fineweb-edu-100b-shuffle"
 
 elif dataset_tag == "climbmix":
-    import tiktoken # the ClimbMix data is stored tokenized with GPT-2 tokenizer
+    import tiktoken # ClimbMix 数据以 GPT-2 tokenizer 做了 tokenize 后存储
     dataset_kwargs = {
         "path": "nvidia/Nemotron-ClimbMix",
         "split": "train",
@@ -60,19 +53,19 @@ elif dataset_tag == "climbmix":
 else:
     raise ValueError(f"Unknown dataset tag: {dataset_tag}")
 
-# Source dataset
+# 源代码数据集
 ds = load_dataset(**dataset_kwargs)
 
-# Shuffle to scramble the order
+# Shuffle 打乱顺序
 ds = ds.shuffle(seed=42)
-ndocs = len(ds) # total number of documents to process
+ndocs = len(ds) # 待处理的文档总数
 print(f"Total number of documents: {ndocs}")
 
-# Repackage into parquet files
+# 重新打包为 parquet 文件
 output_dir = f"/home/ubuntu/.cache/nanochat/base_data_{output_dirname}"
 os.makedirs(output_dir, exist_ok=True)
 
-# Write to parquet files
+# 写 parquet 文件
 chars_per_shard = 250_000_000
 row_group_size = 1024 # HF uses 1000 but we use multiple of 2, nicer for distributed data loader later
 shard_docs = []
@@ -114,7 +107,7 @@ for doc in ds:
         shard_characters = 0
         shard_index += 1
 
-# Demonstration of how the data was later uploaded to HuggingFace
+# 上传到 HuggingFace 的示例代码
 if upload_to_hf:
     from huggingface_hub import HfApi
     token = os.getenv("HF_TOKEN")

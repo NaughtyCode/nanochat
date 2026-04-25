@@ -1,14 +1,26 @@
 """
-SmolTalk by HuggingFace. Good "general" conversational dataset.
+SmolTalk — HuggingFace 发布的通用对话数据集，适合 SFT 训练。
 https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk
-We use the "smol" version, which is more appropriate for smaller models.
+
+我们使用 "smol" 版本（460K 训练 / 24K 测试），
+规模更适合小模型的 SFT 微调。
+数据集格式：每条记录含 messages 列表，user/assistant 交替，
+可选 system 消息作为首条。
 """
 
 from datasets import load_dataset
 from tasks.common import Task
 
 class SmolTalk(Task):
-    """ smol-smoltalk dataset. train is 460K rows, test is 24K rows. """
+    """
+    smol-smoltalk 对话数据集。训练集约 460K 条，测试集约 24K 条。
+
+    数据校验规则：
+    - 每条对话至少 2 条消息（一问一答）
+    - user 和 assistant 必须严格交替
+    - system 消息（可选）只能出现在对话开头
+    - 所有 content 必须是字符串类型
+    """
 
     def __init__(self, split, **kwargs):
         super().__init__(**kwargs)

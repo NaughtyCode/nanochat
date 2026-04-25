@@ -1,10 +1,11 @@
 """
-The base/pretraining dataset is a set of parquet files.
-This file contains utilities for:
-- iterating over the parquet files and yielding documents from it
-- download the files on demand if they are not on disk
+基础/预训练数据集是一组 parquet 文件。
+本模块提供以下工具：
+- 遍历 parquet 文件并从中产出文档
+- 按需下载文件（如果不在磁盘上）
 
-For details of how the dataset was prepared, see `repackage_data_reference.py`.
+数据集：ClimbMix-400B（打乱版本），共 6543 个 shard，最后一个是验证集。
+关于数据集如何准备，参见 `dev/repackage_data_reference.py`。
 """
 
 import os
@@ -17,12 +18,12 @@ from multiprocessing import Pool
 from nanochat.common import get_base_dir
 
 # -----------------------------------------------------------------------------
-# The specifics of the current pretraining dataset
+# 当前预训练数据集的具体信息
 
-# The URL on the internet where the data is hosted and downloaded from on demand
+# 数据托管地址（HuggingFace HF Hub）
 BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
-index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
+MAX_SHARD = 6542              # 最后一个训练数据分片: shard_06542.parquet
+index_to_filename = lambda index: f"shard_{index:05d}.parquet"
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
 
@@ -30,7 +31,7 @@ DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
 # These functions are useful utilities to other modules, can/should be imported
 
 def list_parquet_files(data_dir=None, warn_on_legacy=False):
-    """ Looks into a data dir and returns full paths to all parquet files. """
+    """扫描数据目录，返回所有 parquet 文件的完整路径。"""
     data_dir = DATA_DIR if data_dir is None else data_dir
 
     # Legacy-supporting code due to the upgrade from FinewebEdu-100B to ClimbMix-400B
@@ -65,11 +66,9 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False):
     return parquet_paths
 
 def parquets_iter_batched(split, start=0, step=1):
-    """
-    Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
-    - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
-    """
+    """以 row_group 为批量遍历数据集（比逐行遍历更高效）。
+    - split: "train" 或 "val"。最后一个 parquet 文件是验证集。
+    - start/step: 用于 DDP 跳过行，例如 start=rank, step=world_size。"""
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_paths = list_parquet_files()
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
@@ -82,7 +81,7 @@ def parquets_iter_batched(split, start=0, step=1):
 
 # -----------------------------------------------------------------------------
 def download_single_file(index):
-    """ Downloads a single file index, with some backoff """
+    """下载单个 shard 文件（带指数退避重试机制）。"""
 
     # Construct the local filepath for this file and skip if it already exists
     filename = index_to_filename(index)

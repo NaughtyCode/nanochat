@@ -1,11 +1,16 @@
 """
-Evaluate the Chat model.
-All the generic code lives here, and all the evaluation-specific
-code lives in nanochat directory and is imported from here.
+Chat 模型评估脚本。
 
-Example runs:
-python -m scripts.chat_eval -a ARC-Easy
-torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
+支持两类评估：
+  - generative: 生成式评估（GSM8K、HumanEval、SpellingBee）
+  - categorical: 分类式评估（ARC-Easy、ARC-Challenge、MMLU）
+
+ChatCORE 是这两类的综合得分。
+
+用法：
+  python -m scripts.chat_eval -a ARC-Easy
+  python -m scripts.chat_eval -a GSM8K
+  torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a MMLU
 """
 
 import argparse

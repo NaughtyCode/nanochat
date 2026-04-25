@@ -1,29 +1,22 @@
 """
-Task intended to make nanochat better in spelling and counting, for example:
+让 nanochat 在拼写和计数方面变得更强的任务，例如：
 
-"How many r are in strawberry?" -> 3
+"How many r are in strawberry?" → 3
 
-An interesting part of this task is that we will get the assistant to
-solve the problem using a combination of manual counting and Python.
-This is a good problem solving "instinct" to mix into the model and RL
-may further refine it to trust one over the other. If we were extra fancy
-(which we could/should be) we'd add small errors here and there to allow
-the model also learn recoveries. We can do this in future versions.
+设计的巧妙之处在于：让 assistant 同时使用人工计数和 Python 工具来解决问题。
+这种"双重验证"的解题思路是希望模型学会的良好习惯，后续 RL 训练可以进一步
+优化模型在两种方法之间的信任度选择。
 
-There are two tasks in this file:
-1. SpellingBee: Counting the number of occurrences of a letter in a word
-2. SimpleSpelling: Simply spelling words
+本文件包含两个任务：
+1. SpellingBee — 统计单词中某个字母的出现次数（核心任务）
+2. SimpleSpelling — 简单地逐个字母拼出单词（辅助任务）
 
-(1) is the goal, but (2) exists as a highly condensed version of the part
-that makes (1) difficult, which is word spelling. This is non-trivial for an
-LLM because it has to learn how every token (a little semantic chunk/atom)
-maps to the sequence of individual characters that make it up. Larger models
-learn this eventually on their own, but if we want this capability to exist
-in smaller models, we have to actively encourage it by over-representing it
-in the training data. SFT is a good place to do this.
+(2) 的存在是因为它浓缩了 (1) 中最困难的部分：让 LLM 学会每个 token
+（语义上的小片段/原子）如何映射到构成它的字符序列。大模型最终会自己学会这一点，
+但如果想让小模型也具备这个能力，就必须在训练数据中大量添加相关内容来主动鼓励它。
+SFT 阶段是引入这种能力的最佳时机。
 
-To preview a few example conversations, run:
-python -m tasks.spellingbee
+运行预览：python -m tasks.spellingbee
 """
 
 import re
@@ -38,12 +31,10 @@ WORD_LIST_URL = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads
 # A number bigger than 370K to separate train and test random seeds
 TEST_RANDOM_SEED_OFFSET = 10_000_000
 
-# Identical to gsm8k's answer extraction
+# 与 gsm8k 使用相同的答案提取逻辑
 ANSWER_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
 def extract_answer(completion):
-    """
-    Extract the numerical answer after #### marker.
-    """
+    """从 #### 标记后提取数值答案。"""
     match = ANSWER_RE.search(completion)
     if match:
         match_str = match.group(1).strip()
@@ -51,7 +42,8 @@ def extract_answer(completion):
         return match_str
     return None
 
-# User message templates for data augmentation
+# 用户消息模板 — 通过多样化的提问方式做数据增强
+# 包含英语、西班牙语、中文、韩语、法语、德语、日语共 7 种语言
 USER_MSG_TEMPLATES = [
     "How many {letter} are in the word {word}",
     "How many {letter} are in {word}",
@@ -113,6 +105,21 @@ USER_MSG_TEMPLATES = [
 ]
 
 class SpellingBee(Task):
+    """
+    "拼写蜜蜂"任务：统计单词中某个字母的出现次数。
+
+    解题流程（assistant 的理想回复）：
+    1. 手动逐字拼写单词，逐个计数
+    2. 使用 Python 工具 `word.count(letter)` 进行双重验证
+    3. 以 #### N 格式给出最终答案
+
+    数据增强策略：
+    - 7 种语言的提问模板随机选择
+    - 30% 概率全小写（模拟不按 shift 的用户）
+    - 50% 概率不加问号
+    - 随机给字母/单词添加引号
+    - 90% 概率选词中存在的字母，10% 概率选随机字母（处理字母不在词中的情况）
+    """
 
     def __init__(self, size=1000, split="train", **kwargs):
         super().__init__(**kwargs)
@@ -206,8 +213,8 @@ Then count the occurrences of '{letter}':
 
     def evaluate(self, conversation, assistant_response):
         """
-        Given (conversation, completion), return evaluation outcome (0 = wrong, 1 = correct)
-        Identical to gsm8k's evaluation.
+        评估：从对话和模型补全中提取 #### 答案，比较是否正确。
+        与 gsm8k 的评估逻辑相同：基于 #### 标记提取数值并比较。
         """
         assert isinstance(assistant_response, str), "Assuming simple string response for now"
         # First extract the ground truth answer from the conversation
@@ -224,14 +231,20 @@ Then count the occurrences of '{letter}':
         return is_correct
 
     def reward(self, conversation, assistant_response):
-        """ Use simple 0-1 reward just like gsm8k."""
+        """简单 0-1 奖励，与 gsm8k 一致。用于 RL 训练。"""
         is_correct = self.evaluate(conversation, assistant_response)
         is_correct_float = float(is_correct)
         return is_correct_float
 
 
 class SimpleSpelling(Task):
-    """Much simpler task designed to get the model to just practice spelling words."""
+    """
+    简单拼写任务：让模型练习逐个字母拼出单词。
+
+    与 SpellingBee 使用不同的词序（独立 shuffle），避免两个任务产生
+    相同的词序模式。这个任务作为 SpellingBee 的基础能力训练，
+    帮助模型建立 token→字符 的映射能力。
+    """
 
     def __init__(self, size=1000, split="train", **kwargs):
         super().__init__(**kwargs)

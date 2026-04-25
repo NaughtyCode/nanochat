@@ -1,24 +1,23 @@
 """
-Sandboxed execution utilities for running Python code that comes out of an LLM.
-Adapted from OpenAI HumanEval code:
+沙箱化代码执行工具，用于运行 LLM 生成的 Python 代码。
+改编自 OpenAI HumanEval：
 https://github.com/openai/human-eval/blob/master/human_eval/execution.py
 
-What is covered:
-- Each execution runs in its own process (can be killed if it hangs or crashes)
-- Execution is limited by a timeout to stop infinite loops
-- Memory limits are enforced by default (256MB)
-- stdout and stderr are captured and returned
-- Code runs in a temporary directory that is deleted afterwards
-- Dangerous functions are disabled (examples: os.system, os.kill, shutil.rmtree, subprocess.Popen)
+安全措施：
+- 每次执行在独立进程中运行（可被杀死以防止挂起或崩溃）
+- 超时限制防止无限循环
+- 默认内存限制（256MB）
+- 捕获并返回 stdout 和 stderr
+- 代码在临时目录中运行，执行后删除
+- 禁用危险函数（os.system、os.kill、shutil.rmtree、subprocess.Popen 等）
 
-What is not covered:
-- Not a true security sandbox
-- Network access is not blocked (e.g. sockets could be opened)
-- Python's dynamic features (e.g. ctypes) could bypass restrictions
-- No kernel-level isolation (no seccomp, no containers, no virtualization)
+局限性：
+- 不是真正的安全沙箱
+- 网络访问未被阻止
+- Python 的动态特性（如 ctypes）可能绕过限制
+- 无内核级隔离（无 seccomp、容器或虚拟化）
 
-Overall this sandbox is good for evaluation of generated code and protects against
-accidental destructive behavior, but it is not safe against malicious adversarial code.
+此沙箱适用于评估生成代码并防止意外的破坏行为，但对恶意对抗代码不安全。
 """
 
 import contextlib

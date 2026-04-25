@@ -1,19 +1,15 @@
 """
-Reinforcement learning on GSM8K via "GRPO".
+基于 GSM8K 的强化学习（简化版 GRPO/REINFORCE）。
 
-I put GRPO in quotes because we actually end up with something a lot
-simpler and more similar to just REINFORCE:
+对 GRPO 的简化：
+1) 删除信任区域（无 KL 正则化到参考模型）
+2) On-policy（无需 PPO ratio+clip）
+3) DAPO 风格的 token 级别标准化（非序列级别）
+4) 使用 (r - mu) 而非 z-score 标准化作为 advantage
 
-1) Delete trust region, so there is no KL regularization to a reference model
-2) We are on policy, so there's no need for PPO ratio+clip.
-3) We use DAPO style normalization that is token-level, not sequence-level.
-4) Instead of z-score normalization (r - mu)/sigma, only use (r - mu) as the advantage.
-
-1 GPU:
-python -m scripts.chat_rl
-
-8 GPUs:
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
+用法：
+  python -m scripts.chat_rl                                         # 单 GPU
+  torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl     # 8 GPU 分布式
 """
 
 import argparse

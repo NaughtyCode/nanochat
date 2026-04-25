@@ -1,12 +1,15 @@
 """
-Supervised fine-tuning (SFT) the model.
-Run as:
+有监督微调（SFT）主脚本。
 
-python -m scripts.chat_sft
+数据混合：SmolTalk + 身份对话 + MMLU + GSM8K + SpellingBee + SimpleSpelling
+特性：
+  - 从预训练 checkpoint 热启动优化器状态（warm-start）
+  - 基于进度的线性学习率调度（init_lr_frac 到 zero）
+  - 继承预训练模型的大部分超参数
 
-Or torchrun for training:
-
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
+用法：
+  python -m scripts.chat_sft                                        # 单 GPU
+  torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft     # 8 GPU 分布式
 """
 
 import gc

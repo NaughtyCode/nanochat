@@ -1,8 +1,12 @@
 """
-New and upgraded chat mode because a lot of the code has changed since the last one.
+交互式 CLI 聊天界面。
 
-Intended to be run single GPU only atm:
-python -m scripts.chat_cli
+支持流式生成、工具调用（Python 计算器）以及 SFT/RL 模型切换。
+
+用法：
+  python -m scripts.chat_cli                     # 默认 SFT 模型
+  python -m scripts.chat_cli -i rl               # RL 模型
+  python -m scripts.chat_cli -p "Hello"          # 单次 prompt 模式
 """
 import argparse
 import torch
